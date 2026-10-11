@@ -10,12 +10,12 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
+
 rng = secrets.SystemRandom()
 WARSAW = ZoneInfo("Europe/Warsaw")
 
 sessions = defaultdict(lambda: {
     "mode": None,
-    "game": "Lotto",
     "count": 1,
     "history": []
 })
@@ -28,7 +28,7 @@ GAMES = {
     "Keno": (7, 70),
 }
 
-MENU = [
+MAIN_MENU = [
     ["🎲 Wylosuj liczby", "🎰 Wylosuj grę"],
     ["🎟️ Generuj kupony", "🍀 Szczęśliwa liczba"],
     ["⚡ Szybki strzał", "📜 Moje losowania"],
@@ -39,53 +39,50 @@ MENU = [
 GAME_MENU = [
     ["Lotto", "Mini Lotto"],
     ["Eurojackpot", "Multi Multi"],
-    ["Keno", "🔙 Menu główne"]
+    ["Keno", "🔙 Menu główne"],
 ]
 
 COUNT_MENU = [
     ["1 kupon", "3 kupony", "5 kuponów"],
-    ["10 kuponów", "🔙 Menu główne"]
+    ["10 kuponów", "🔙 Menu główne"],
 ]
 
 RULES_MENU = [
     ["Lotto", "Mini Lotto"],
     ["Eurojackpot", "Multi Multi"],
     ["Keno", "Szybkie 600"],
-    ["🔙 Menu główne"]
+    ["🔙 Menu główne"],
 ]
 
 RULES = {
-    "Lotto": (
-        "Wybiera się 6 liczb z 49. "
-        "Trafienia porównuje się z oficjalnym losowaniem."
-    ),
-    "Mini Lotto": (
-        "Wybiera się 5 liczb z 42. "
-        "Trafienia porównuje się z oficjalnym losowaniem."
-    ),
+    "Lotto": "Wybierasz 6 liczb z 49.",
+    "Mini Lotto": "Wybierasz 5 liczb z 42.",
     "Eurojackpot": (
-        "Wybiera się 5 liczb z 50 "
-        "oraz 2 dodatkowe z 12."
+        "Wybierasz 5 liczb z 50 "
+        "i 2 Euroliczby z 12."
     ),
     "Multi Multi": (
-        "Można wytypować od 1 do 10 liczb z 80; "
-        "w losowaniu pada 20 liczb. "
-        "Generator przykładowo typuje 10."
+        "Typujesz od 1 do 10 liczb z 80. "
+        "Losowanych jest 20 liczb. "
+        "Generator typuje 10."
     ),
     "Keno": (
-        "Można wytypować od 1 do 10 liczb z 70; "
-        "w losowaniu pada 20. "
-        "Generator przykładowo typuje 7."
+        "Typujesz od 1 do 10 liczb z 70. "
+        "Losowanych jest 20 liczb. "
+        "Generator typuje 7."
     ),
     "Szybkie 600": (
-        "Ta gra ma własne zasady typowania i wygranych. "
-        "Zanim dodamy kupony DEMO, zweryfikujemy "
-        "aktualny regulamin organizatora."
+        "Aktualne zasady i tabele wygranych "
+        "znajdziesz w regulaminie na lotto.pl."
     ),
 }
 
+DEMO_URL = (
+    "https://lottoscan-x.onrender.com/static/demo.html"
+)
 
-def keyboard(rows=MENU):
+
+def keyboard(rows=MAIN_MENU):
     return {
         "keyboard": [
             [{"text": title} for title in row]
@@ -96,44 +93,51 @@ def keyboard(rows=MENU):
     }
 
 
-def pick(game):
-    n, maximum = GAMES[game]
+def send(chat_id, text, rows=MAIN_MENU, inline=None):
+    if inline is not None:
+        markup = {"inline_keyboard": inline}
+    else:
+        markup = keyboard(rows)
+
+    return jsonify({
+        "method": "sendMessage",
+        "chat_id": chat_id,
+        "text": text[:4000],
+        "reply_markup": markup
+    })
+
+
+def draw(game):
+    count, maximum = GAMES[game]
+
     numbers = sorted(
-        rng.sample(range(1, maximum + 1), n)
+        rng.sample(range(1, maximum + 1), count)
     )
+
     result = " • ".join(map(str, numbers))
 
     if game == "Eurojackpot":
-        extra = sorted(
+        stars = sorted(
             rng.sample(range(1, 13), 2)
         )
         result += (
             "\n⭐ Euroliczby: "
-            + " • ".join(map(str, extra))
+            + " • ".join(map(str, stars))
         )
 
     return result
 
 
-def save(session, entry):
+def save_history(session, entry):
     session["history"].append(entry)
     session["history"] = session["history"][-10:]
-
-
-def send(chat_id, answer, rows=MENU):
-    return jsonify({
-        "method": "sendMessage",
-        "chat_id": chat_id,
-        "text": answer[:4000],
-        "reply_markup": keyboard(rows)
-    })
 
 
 @app.get("/")
 def home():
     return jsonify(
         status="LottoScan X online",
-        version="0.2"
+        version="0.3"
     )
 
 
@@ -157,12 +161,12 @@ def webhook():
     ):
         return jsonify(error="Brak dostępu"), 403
 
-    data = request.get_json(silent=True)
+    update = request.get_json(silent=True)
 
-    if not isinstance(data, dict):
+    if not isinstance(update, dict):
         return jsonify(error="Niepoprawne dane"), 400
 
-    msg = data.get("message")
+    msg = update.get("message")
 
     if not isinstance(msg, dict):
         return jsonify(ok=True)
@@ -179,30 +183,33 @@ def webhook():
     session = sessions[chat_id]
 
     text = (msg.get("text") or "").strip()
-    command = (
-        text.split()[0].split("@")[0]
-        if text.startswith("/") else text
-    )
+
+    if text.startswith("/") and text:
+        command = text.split()[0].split("@")[0]
+    else:
+        command = text
 
     if command in (
-        "/start", "🔙 Menu główne", "/menu"
+        "/start", "/menu", "🔙 Menu główne"
     ):
         session["mode"] = None
+
         return send(
             chat_id,
-            "🎱 Witaj w LottoScan X!\n"
+            "🎱 Witaj w LottoScan X!\n\n"
             "Wybierz kafelek poniżej.\n\n"
-            "🍀 Losowania są losowe "
-            "i nie przewidują wyników."
+            "🍀 Liczby są losowe, "
+            "nie są prognozą wyników."
         )
 
     if command in (
         "🎲 Wylosuj liczby", "/losuj"
     ):
         session["mode"] = "single"
+
         return send(
             chat_id,
-            "🎲 Z jakiej gry mam wylosować liczby?",
+            "🎲 Wybierz grę:",
             GAME_MENU
         )
 
@@ -210,9 +217,10 @@ def webhook():
         "🎟️ Generuj kupony", "/kupon"
     ):
         session["mode"] = "count"
+
         return send(
             chat_id,
-            "🎟️ Ile zestawów wygenerować?",
+            "🎟️ Ile zestawów mam wygenerować?",
             COUNT_MENU
         )
 
@@ -225,10 +233,10 @@ def webhook():
     ):
         session["count"] = int(text.split()[0])
         session["mode"] = "multiple"
+
         return send(
             chat_id,
-            f"🎟️ {session['count']} zestawów "
-            "— wybierz grę:",
+            "🎟️ Teraz wybierz grę:",
             GAME_MENU
         )
 
@@ -236,10 +244,10 @@ def webhook():
         "📖 Zasady gier", "/zasady"
     ):
         session["mode"] = "rules"
+
         return send(
             chat_id,
-            "📖 Wybierz grę, której "
-            "zasady chcesz poznać:",
+            "📖 Wybierz grę:",
             RULES_MENU
         )
 
@@ -249,9 +257,10 @@ def webhook():
     ):
         return send(
             chat_id,
-            f"📖 {text}\n\n{RULES[text]}\n\n"
-            "Aktualne stawki, terminy "
-            "i regulaminy sprawdź na lotto.pl.",
+            f"📖 {text}\n\n"
+            f"{RULES[text]}\n\n"
+            "Pełny aktualny regulamin:\n"
+            "https://www.lotto.pl/",
             RULES_MENU
         )
 
@@ -265,59 +274,64 @@ def webhook():
             else 1
         )
 
-        entries = [
-            f"{i}. {pick(text)}"
+        lines = [
+            f"{i}. {draw(text)}"
             for i in range(1, count + 1)
         ]
 
         answer = (
             f"🎟️ {text} — {count} zestaw(ów):\n\n"
-            + "\n".join(entries)
+            + "\n".join(lines)
         )
 
-        save(session, answer)
+        save_history(session, answer)
         session["mode"] = None
+
         return send(chat_id, answer)
 
     if command in (
         "🎰 Wylosuj grę", "/gra"
     ):
-        selected = rng.choice(list(GAMES))
+        game = rng.choice(list(GAMES))
+
         return send(
             chat_id,
-            f"🎰 Wylosowana gra: {selected}\n"
+            f"🎰 Wylosowana gra: {game}\n\n"
             "Wybierz «Wylosuj liczby», "
-            "aby wygenerować kupon."
+            "aby przygotować zestaw."
         )
 
     if command == "🍀 Szczęśliwa liczba":
         number = rng.randint(1, 49)
+
         return send(
             chat_id,
-            f"🍀 Szczęśliwa liczba (1–49): {number}"
+            f"🍀 Twoja szczęśliwa liczba: {number}"
         )
 
     if command == "⚡ Szybki strzał":
         game = rng.choice(list(GAMES))
-        answer = f"⚡ {game}\n\n{pick(game)}"
-        save(session, answer)
+
+        answer = f"⚡ {game}\n\n{draw(game)}"
+
+        save_history(session, answer)
+
         return send(chat_id, answer)
 
     if command in (
         "📜 Moje losowania", "/historia"
     ):
-        entries = session["history"][-5:]
+        recent = session["history"][-5:]
 
-        if entries:
+        if recent:
             answer = (
                 "📜 Ostatnie zestawy:\n\n"
-                + "\n\n".join(entries)
+                + "\n\n".join(recent)
             )
         else:
             answer = (
-                "📜 Nie masz jeszcze "
-                "wygenerowanych zestawów.\n"
-                "Historia znika po restarcie serwera."
+                "📜 Historia jest pusta.\n"
+                "Znika również po restarcie serwera."
             )
 
         return send(chat_id, answer)
@@ -325,18 +339,16 @@ def webhook():
     if command in (
         "📅 Kalendarz", "/kalendarz"
     ):
-        today = datetime.now(WARSAW).strftime(
+        date = datetime.now(WARSAW).strftime(
             "%d.%m.%Y"
         )
 
         return send(
             chat_id,
-            f"📅 Dziś: {today}\n\n"
-            "Aktualne godziny losowań "
-            "i wyniki sprawdzisz tutaj:\n"
+            f"📅 Dziś: {date}\n\n"
+            "Aktualny harmonogram losowań:\n"
             "https://www.lotto.pl/\n\n"
-            "Automatyczny terminarz dodamy "
-            "po podłączeniu źródła danych."
+            "Automatyczny kalendarz dodamy później."
         )
 
     if command in (
@@ -344,11 +356,23 @@ def webhook():
     ):
         return send(
             chat_id,
-            "🎮 Strefa DEMO jest w przygotowaniu.\n"
-            "Plan: Keno i Szybkie 600, "
-            "wirtualne 50 zł, wybór liczb, "
-            "losowanie i historia.\n"
-            "Bez wpłat ani prawdziwych nagród."
+            "🎮 LOTTOScan X — STREFA DEMO\n\n"
+            "🎱 KENO DEMO\n"
+            "💰 Portfel startowy: 50 zł\n"
+            "🔢 Plansza z 70 liczbami\n"
+            "🎯 Wybór liczb i wirtualnej stawki\n"
+            "🏆 Symulowane losowania i wyniki\n\n"
+            "Szybkie 600 DEMO dodamy później.\n\n"
+            "To symulator bez prawdziwych "
+            "pieniędzy i nagród.",
+            inline=[[
+                {
+                    "text": "🎱 OTWÓRZ KENO DEMO",
+                    "web_app": {
+                        "url": DEMO_URL
+                    }
+                }
+            ]]
         )
 
     if command in (
@@ -356,11 +380,10 @@ def webhook():
     ):
         return send(
             chat_id,
-            "📷 Skaner jest w przygotowaniu.\n"
-            "Zdjęcie lub odczyt kodu nie stanowią "
-            "potwierdzenia wygranej.\n"
-            "Do weryfikacji potrzebny jest "
-            "oficjalny system LOTTO."
+            "📷 SKANER KUPONÓW\n\n"
+            "Funkcja jest w przygotowaniu.\n"
+            "Nie potwierdzamy wygranych "
+            "bez oficjalnej weryfikacji."
         )
 
     if command in (
@@ -368,28 +391,28 @@ def webhook():
     ):
         return send(
             chat_id,
-            "🎱 Wybierz kafelek z menu.\n"
-            "/losuj — wybierz grę\n"
-            "/kupon — wiele zestawów\n"
-            "/gra — losowa gra\n"
+            "🎱 LOTTOScan X — Pomoc\n\n"
+            "/losuj — losowanie liczb\n"
+            "/gra — losowanie gry\n"
+            "/kupon — generator kuponów\n"
             "/historia — ostatnie zestawy\n"
-            "/kalendarz — informacje\n"
+            "/kalendarz — terminarz\n"
             "/zasady — instrukcje\n"
-            "/demo — informacje o DEMO\n"
-            "/skanuj — informacje o skanerze"
+            "/demo — gry DEMO\n"
+            "/skanuj — skaner"
         )
 
     if text in GAMES:
         return send(
             chat_id,
-            "Najpierw kliknij "
-            "«🎲 Wylosuj liczby» albo "
-            "«🎟️ Generuj kupony»."
+            "Najpierw wybierz "
+            "🎲 Wylosuj liczby albo "
+            "🎟️ Generuj kupony."
         )
 
     return send(
         chat_id,
-        "Nie rozpoznaję polecenia. "
-        "Wybierz kafelek z menu "
-        "lub wyślij /start."
+        "Nie rozpoznaję polecenia.\n"
+        "Kliknij przycisk w menu "
+        "lub wpisz /start."
     )
