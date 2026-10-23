@@ -46,6 +46,10 @@ def valid_numbers(numbers, count, maximum):
     )
 
 
+def reject_nonfinite(value):
+    raise ValueError("Niedozwolona stała JSON")
+
+
 def latest_result(data, game_type):
     if not isinstance(data, list) or game_type not in RESULT_SHAPES:
         raise LottoError("Nierozpoznany format wyników LOTTO.")
@@ -61,6 +65,9 @@ def latest_result(data, game_type):
                 continue
             draw_id = row.get("drawSystemId", draw_info.get("drawSystemId"))
             if type(draw_id) is not int or not 0 < draw_id < 2**63:
+                continue
+            multiplier = draw_info.get("multiplierValue")
+            if multiplier is not None and (type(multiplier) is not int or not 0 <= multiplier < 2**63):
                 continue
             stamp = row.get("drawDate") or draw_info.get("drawDate")
             try:
@@ -82,7 +89,7 @@ def latest_result(data, game_type):
             candidates.append((parsed, {
                 "gameType": game_type, "drawSystemId": draw_id,
                 "drawDate": parsed.isoformat(), "numbers": row["resultsJson"],
-                "specialResults": special, "multiplierValue": draw_info.get("multiplierValue"),
+                "specialResults": special, "multiplierValue": multiplier,
             }))
     if not candidates:
         raise LottoError("Brak opublikowanego, kompletnego wyniku tej gry.", 404)
@@ -117,7 +124,7 @@ class LottoClient:
                 raw = response.read(2 * 1024 * 1024 + 1)
             if len(raw) > 2 * 1024 * 1024:
                 raise LottoError("Odpowiedź LOTTO jest zbyt duża.")
-            return json.loads(raw)
+            return json.loads(raw, parse_constant=reject_nonfinite)
         except HTTPError as error:
             code = error.code
             retry_after = error.headers.get("Retry-After", "10") if error.headers else "10"
@@ -170,9 +177,8 @@ class LottoClient:
             ttl = self.cache_seconds
             if kind == "next-draw":
                 ttl = min(ttl, max(0, parse_date(result["nextDrawDate"]).timestamp() - time.time()))
-            self.storage.cache_success(key, owner, result, ttl)
-            entry = self.storage.cached(key)
-            return self._payload(result, entry["fetched_at"], False)
+            fetched_at = self.storage.cache_success(key, owner, result, ttl)
+            return self._payload(result, fetched_at, False)
         except LottoError as error:
             self.storage.cache_failure(key, owner, error, error.status, error.retry_after)
             raise

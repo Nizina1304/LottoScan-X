@@ -180,3 +180,21 @@ def test_upstream_http_errors(app, monkeypatch, code, expected):
 
 def test_redirects_not_followed():
     assert lotto.NoRedirect().redirect_request(None, None, 302, "", {}, "https://example.invalid") is None
+
+
+@pytest.mark.parametrize("multiplier", [True, {}, "2", float("nan"), float("inf")])
+def test_invalid_multiplier(multiplier):
+    with pytest.raises(LottoError):
+        latest_result(fixture(multiplierValue=multiplier), "Lotto")
+
+
+def test_nonfinite_upstream_json(app, monkeypatch):
+    response = Mock()
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=False)
+    response.read.return_value = b'{"value":NaN}'
+    opener = Mock()
+    opener.open.return_value = response
+    monkeypatch.setattr(lotto, "build_opener", lambda *a: opener)
+    with pytest.raises(LottoError):
+        app.extensions["lotto"].payload("results", "Lotto")

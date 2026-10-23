@@ -96,8 +96,8 @@ class Storage:
                 with self.engine.begin() as conn:
                     inserted = conn.execute(self.insert(processed_updates).values(
                         update_id=update_id, chat_id=chat_id, created_at=time.time(),
-                    ).on_conflict_do_nothing()).rowcount
-                    if not inserted:
+                    ).on_conflict_do_nothing().returning(processed_updates.c.update_id)).scalar_one_or_none()
+                    if inserted is None:
                         return None
                     # Late delivery is acknowledged but never rewinds the conversation.
                     if outdated:
@@ -106,13 +106,13 @@ class Storage:
                     if version is None:
                         changed = conn.execute(self.insert(bot_sessions).values(
                             chat_id=chat_id, version=1, **values,
-                        ).on_conflict_do_nothing()).rowcount
+                        ).on_conflict_do_nothing().returning(bot_sessions.c.chat_id)).scalar_one_or_none()
                     else:
                         changed = conn.execute(update(bot_sessions).where(
                             bot_sessions.c.chat_id == chat_id,
                             bot_sessions.c.version == version,
-                        ).values(version=version + 1, **values)).rowcount
-                    if not changed:
+                        ).values(version=version + 1, **values).returning(bot_sessions.c.chat_id)).scalar_one_or_none()
+                    if changed is None:
                         raise ConcurrentUpdate()
                 return answer
             except ConcurrentUpdate:
@@ -143,19 +143,22 @@ class Storage:
             conn.execute(self.insert(cache_entries).values(
                 key=key, expires_at=0, lease_until=0, cooldown_until=0,
             ).on_conflict_do_nothing())
-            return bool(conn.execute(update(cache_entries).where(
+            claimed = conn.execute(update(cache_entries).where(
                 cache_entries.c.key == key,
                 cache_entries.c.lease_until <= now,
                 cache_entries.c.cooldown_until <= now,
-            ).values(lease_owner=owner, lease_until=now + seconds)).rowcount)
+            ).values(lease_owner=owner, lease_until=now + seconds).returning(cache_entries.c.key)).first()
+            return claimed is not None
 
     def cache_success(self, key, owner, payload, ttl):
+        fetched_at = datetime.now(timezone.utc).isoformat()
         with self.engine.begin() as conn:
             conn.execute(update(cache_entries).where(
                 cache_entries.c.key == key, cache_entries.c.lease_owner == owner,
-            ).values(payload=payload, fetched_at=datetime.now(timezone.utc).isoformat(),
+            ).values(payload=payload, fetched_at=fetched_at,
                      expires_at=time.time() + max(0, ttl), lease_until=0,
                      lease_owner=None, cooldown_until=0, error=None, error_status=None))
+        return fetched_at
 
     def cache_failure(self, key, owner, error, status, retry_after):
         with self.engine.begin() as conn:
@@ -174,13 +177,13 @@ class Storage:
         """Bound coordination records; conversation histories are not purged."""
         now = time.time()
         with self.engine.begin() as conn:
-            old_updates = conn.execute(delete(processed_updates).where(
+            old_updates = len(conn.execute(delete(processed_updates).where(
                 processed_updates.c.created_at < now - 7 * 86400,
-            )).rowcount
+            ).returning(processed_updates.c.update_id)).all())
             conn.execute(delete(rate_buckets).where(rate_buckets.c.window < int(now // 60) - 1))
-            old_cache = conn.execute(delete(cache_entries).where(
+            old_cache = len(conn.execute(delete(cache_entries).where(
                 cache_entries.c.expires_at < now - 86400,
                 cache_entries.c.lease_until < now,
                 cache_entries.c.cooldown_until < now,
-            )).rowcount
+            ).returning(cache_entries.c.key)).all())
         return {"updates": old_updates, "cache": old_cache}
